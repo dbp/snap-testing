@@ -42,7 +42,7 @@ Where `getRandomUser` is a function written in your applications
 handler (using whatever state needed).
 
 -}
-module Snap.Testing
+module Snap.Test.BDD
        (
        -- * Types
          SnapTesting
