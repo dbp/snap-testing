@@ -94,7 +94,7 @@ import           Data.Text (Text, pack, unpack)
 import qualified Data.Text as T (append)
 import           Data.Text.Encoding (encodeUtf8)
 import           Data.Monoid (mempty)
-import           Data.Maybe (fromJust)
+import           Data.Maybe (fromMaybe)
 import           Control.Monad (liftM, zipWithM, void)
 import           Control.Monad.Trans
 import           Control.Monad.Trans.State (StateT, evalStateT)
@@ -364,7 +364,7 @@ testRedirectTo uri rsp = do
     testRedirect rsp
     testEqual message uri rspUri
   where
-    rspUri = fromJust $ getHeader "Location" rsp
+    rspUri = fromMaybe "" $ getHeader "Location" rsp
     message = pack $ "Expected redirect to " ++ show uri
               ++ " but got redirected to "
               ++ show rspUri ++ " instead"

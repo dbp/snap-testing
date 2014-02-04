@@ -1,3 +1,9 @@
+0.2.0.1 - 2014-2-3 - Fix bug in redirectsto.
+  * redirectsto would try to get the location header using a partial function
+	regardless of whether it was a redirect, causing the whole test suite
+	to fail.
+
+
 0.2.0.0 - 2014-1-13 - Renaming root.
   * Snap.Testing becomes Snap.Test.BDD, as per comment by @gregorycollins.
 
