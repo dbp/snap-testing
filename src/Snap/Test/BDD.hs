@@ -6,6 +6,10 @@ module Snap.Test.BDD
          SnapTesting
        , TestRequest
        , TestLog
+       , SnapTestingConfig (..)
+
+       -- * Configuration
+       , defaultConfig
 
        -- * Running tests
        , runSnapTests
@@ -47,18 +51,18 @@ module Snap.Test.BDD
        , quickCheck
        ) where
 
+import           Prelude hiding (FilePath)
 import           Data.Map (Map, fromList)
 import           Data.ByteString (ByteString, isInfixOf)
 import           Data.Text (Text, pack, unpack)
 import qualified Data.Text as T (append)
 import           Data.Text.Encoding (encodeUtf8)
-import           Data.Monoid (mempty, mconcat)
+import           Data.Monoid (mempty)
 import           Data.Maybe (fromMaybe)
-import           Control.Monad (liftM, zipWithM, void)
+import           Control.Monad (void)
 import           Control.Monad.Trans
 import           Control.Monad.Trans.State (StateT, evalStateT)
 import qualified Control.Monad.Trans.State as S (get, put)
-import           Control.Monad.Trans.Writer (WriterT(..), tell)
 import           Control.Exception (SomeException, catch)
 import           System.Process (system)
 import           Snap.Core (Response(..), getHeader)
@@ -70,12 +74,16 @@ import           Test.QuickCheck (Args(..), Result(..), Testable, quickCheckWith
 import           System.IO.Streams (InputStream, OutputStream)
 import qualified System.IO.Streams as S
 import qualified System.IO.Streams.Concurrent as S
-import           Control.Concurrent.Async
+import           System.FSNotify (withManager)
+import           System.FSNotify.Devel (treeExtExists)
+import           Control.Concurrent.Async (async, wait)
+import           Control.Concurrent (threadDelay, forkIO)
+import           Control.Concurrent.MVar (MVar, newEmptyMVar, tryPutMVar, takeMVar)
+import           Filesystem.Path (FilePath)
 
 -- | The main type for this library, where `b` is your application state,
--- often called `App`. This is a State and Writer monad on top of IO, where the State carries
--- your application (or, more specifically, a top-level handler), and the Writer allows tests
--- to be reported as passing or failing.
+-- often called `App`. This is a State monad on top of IO, where the State carries
+-- your application (or, more specifically, a top-level handler and output stream).
 type SnapTesting b a = StateT (Handler b b (), SnapletInit b b, OutputStream TestLog) IO a
 
 -- | TestRequests are created with `get` and `post`.
@@ -84,28 +92,52 @@ type TestRequest = RequestBuilder IO ()
 -- | TestLog is what is streamed to report generators. It is a flatten tree structure.
 data TestLog = NameStart Text | NameEnd | TestPass Text | TestFail Text deriving Show
 
+data SnapTestingConfig = SnapTestingConfig { reportGenerators :: [InputStream TestLog -> IO ()]
+                                           , watchDirectories :: [FilePath] }
+
+defaultConfig :: SnapTestingConfig
+defaultConfig = SnapTestingConfig { reportGenerators = [consoleReport]
+                                  , watchDirectories = []
+                                  }
+
 -- | dupN duplicates an input stream N times
 dupN :: Int -> InputStream a -> IO [InputStream a]
-dupN 0 s = return []
+dupN 0 _ = return []
 dupN 1 s = return [s]
 dupN n s = do (a, b) <- S.map (\x -> (x,x)) s >>= S.unzip
               rest <- dupN (n - 1) b
               return (a:rest)
 
+
 -- | Run a set of tests, putting the results through the specified report generators
-runSnapTests :: [InputStream TestLog -> IO ()] -- ^ Report generators
+runSnapTests :: SnapTestingConfig              -- ^ Configuration for test runner
              -> Handler b b ()                 -- ^ Site that requests are run against (often route routes, where routes are your sites routes).
              -> SnapletInit b b                -- ^ Site initializer
              -> SnapTesting b ()               -- ^ Block of tests
              -> IO ()
-runSnapTests rgs site app tests = do
-  (inp, out) <- S.makeChanPipe
-  istreams <- dupN (length rgs) inp
-  consumers <- mapM (\(inp, hndl) -> async (hndl inp)) (zip istreams rgs)
-  evalStateT tests (site, app, out)
-  S.write Nothing out
-  mapM_ wait consumers
-  return ()
+runSnapTests conf site app tests = do
+  runTests
+  case watchDirectories conf of
+    [] -> return ()
+    dirs -> do shouldRun <- newEmptyMVar :: IO (MVar ())
+               withManager (\man ->
+                              do mapM_ (\d -> treeExtExists man d "hs" (triggerRun shouldRun)) dirs
+                                 forkIO (testRunner shouldRun)
+                                 loopForever)
+  where runTests = do (inpStart, out) <- S.makeChanPipe
+                      let rgs = reportGenerators conf
+                      istreams <- dupN (length rgs) inpStart
+                      consumers <- mapM (\(inp, hndl) -> async (hndl inp)) (zip istreams rgs)
+                      evalStateT tests (site, app, out)
+                      S.write Nothing out
+                      mapM_ wait consumers
+                      return ()
+        triggerRun mv _ = void $ tryPutMVar mv ()
+        testRunner mv = do _ <- takeMVar mv
+                           runTests
+                           testRunner mv
+        loopForever = do threadDelay 1000
+                         loopForever
 
 
 -- | Prints test results to the console. For example:
@@ -115,23 +147,24 @@ runSnapTests rgs site app tests = do
 -- >  creates a new account PASSED
 consoleReport :: InputStream TestLog -> IO ()
 consoleReport stream = cr 0
-  where cr indent = do log <- S.read stream
-                       case log of
+  where cr indent = do logRes <- S.read stream
+                       case logRes of
                          Nothing -> return ()
                          Just (NameStart n) -> do putStrLn ""
                                                   printIndent indent
                                                   putStr (unpack n)
                                                   cr (indent + indentUnit)
-                         Just (NameEnd) -> cr (indent - indentUnit)
-                         Just (TestPass n) -> do putStr " PASSED"
+                         Just NameEnd -> cr (indent - indentUnit)
+                         Just (TestPass _) -> do putStr " PASSED"
                                                  cr indent
-                         Just (TestFail er) -> do putStr " FAILED"
-                                                  cr indent
+                         Just (TestFail _) -> do putStr " FAILED"
+                                                 cr indent
         indentUnit = 2
         printIndent n = putStr (replicate n ' ')
 
 
--- | Sends the test results to desktop notifications on linux. Prints how many tests passed and failed.
+-- | Sends the test results to desktop notifications on linux.
+-- Prints how many tests passed and failed.
 linuxDesktopReport :: InputStream TestLog -> IO ()
 linuxDesktopReport stream = do
   res <- S.toList stream
