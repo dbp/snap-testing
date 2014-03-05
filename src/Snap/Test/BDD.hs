@@ -57,7 +57,7 @@ import           Data.ByteString (ByteString, isInfixOf)
 import           Data.Text (Text, pack, unpack)
 import qualified Data.Text as T (append, isInfixOf)
 import           Data.Text.Encoding (encodeUtf8)
-import           Data.Monoid (mempty)
+import           Data.Monoid (mempty, mconcat)
 import           Data.Maybe (fromMaybe)
 import           Control.Monad (void, unless)
 import           Control.Monad.Trans
@@ -74,16 +74,12 @@ import           Test.QuickCheck (Args(..), Result(..), Testable, quickCheckWith
 import           System.IO.Streams (InputStream, OutputStream)
 import qualified System.IO.Streams as S
 import qualified System.IO.Streams.Concurrent as S
-import           System.FSNotify (withManager)
-import           System.FSNotify.Devel (treeExtExists)
-import           Control.Concurrent.Async (async, wait)
-import           Control.Concurrent (threadDelay, forkIO)
-import           Control.Concurrent.MVar (MVar, newEmptyMVar, tryPutMVar, takeMVar)
-import           Filesystem.Path (FilePath)
+import           Control.Concurrent.Async
 
 -- | The main type for this library, where `b` is your application state,
--- often called `App`. This is a State monad on top of IO, where the State carries
--- your application (or, more specifically, a top-level handler and output stream).
+-- often called `App`. This is a State and Writer monad on top of IO, where the State carries
+-- your application (or, more specifically, a top-level handler), and the Writer allows tests
+-- to be reported as passing or failing.
 type SnapTesting b a = StateT (Handler b b (), SnapletInit b b, OutputStream TestLog) IO a
 
 -- | TestRequests are created with `get` and `post`.
@@ -93,24 +89,20 @@ type TestRequest = RequestBuilder IO ()
 data TestLog = NameStart Text | NameEnd | TestPass Text | TestFail Text | TestError Text deriving Show
 
 data SnapTestingConfig = SnapTestingConfig { reportGenerators :: [InputStream TestLog -> IO ()]
-                                           , watchDirectories :: [FilePath]
-                                           , ignorePatterns :: [Text]
                                            }
 
 defaultConfig :: SnapTestingConfig
 defaultConfig = SnapTestingConfig { reportGenerators = [consoleReport]
-                                  , watchDirectories = []
-                                  , ignorePatterns = []
                                   }
+
 
 -- | dupN duplicates an input stream N times
 dupN :: Int -> InputStream a -> IO [InputStream a]
-dupN 0 _ = return []
+dupN 0 s = return []
 dupN 1 s = return [s]
 dupN n s = do (a, b) <- S.map (\x -> (x,x)) s >>= S.unzip
               rest <- dupN (n - 1) b
               return (a:rest)
-
 
 -- | Run a set of tests, putting the results through the specified report generators
 runSnapTests :: SnapTestingConfig              -- ^ Configuration for test runner
@@ -119,29 +111,14 @@ runSnapTests :: SnapTestingConfig              -- ^ Configuration for test runne
              -> SnapTesting b ()               -- ^ Block of tests
              -> IO ()
 runSnapTests conf site app tests = do
-  runTests
-  case watchDirectories conf of
-    [] -> return ()
-    dirs -> do shouldRun <- newEmptyMVar :: IO (MVar ())
-               withManager (\man ->
-                              do mapM_ (\d -> treeExtExists man d "hs" (triggerRun shouldRun)) dirs
-                                 forkIO (testRunner shouldRun)
-                                 loopForever)
-  where runTests = do (inpStart, out) <- S.makeChanPipe
-                      let rgs = reportGenerators conf
-                      istreams <- dupN (length rgs) inpStart
-                      consumers <- mapM (\(inp, hndl) -> async (hndl inp)) (zip istreams rgs)
-                      evalStateT tests (site, app, out)
-                      S.write Nothing out
-                      mapM_ wait consumers
-                      return ()
-        triggerRun mv f = unless (any (`T.isInfixOf` (pack (show f))) (ignorePatterns conf))
-                                 (void $ tryPutMVar mv ())
-        testRunner mv = do _ <- takeMVar mv
-                           runTests
-                           testRunner mv
-        loopForever = do threadDelay 1000
-                         loopForever
+  (inp, out) <- S.makeChanPipe
+  let rgs = reportGenerators conf
+  istreams <- dupN (length rgs) inp
+  consumers <- mapM (\(inp, hndl) -> async (hndl inp)) (zip istreams rgs)
+  evalStateT tests (site, app, out)
+  S.write Nothing out
+  mapM_ wait consumers
+  return ()
 
 
 -- | Prints test results to the console. For example:
@@ -151,9 +128,9 @@ runSnapTests conf site app tests = do
 -- >  creates a new account PASSED
 consoleReport :: InputStream TestLog -> IO ()
 consoleReport stream = cr 0
-  where cr indent = do logRes <- S.read stream
-                       case logRes of
-                         Nothing -> putStrLn ""
+  where cr indent = do log <- S.read stream
+                       case log of
+                         Nothing -> return ()
                          Just (NameStart n) -> do putStrLn ""
                                                   printIndent indent
                                                   putStr (unpack n)
