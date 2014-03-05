@@ -1,3 +1,5 @@
+0.2.1.0 - 2014-2-11 - Add support for get requests with parameters.
+
 0.2.0.1 - 2014-2-3 - Fix bug in redirectsto.
   * redirectsto would try to get the location header using a partial function
 	regardless of whether it was a redirect, causing the whole test suite

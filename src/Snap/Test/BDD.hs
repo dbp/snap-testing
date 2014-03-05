@@ -59,6 +59,7 @@ module Snap.Test.BDD
 
        -- * Creating Requests
        , get
+       , get'
        , post
        , params
 
@@ -197,6 +198,12 @@ get :: ByteString -- ^ The url to request.
     -> TestRequest
 get = flip Test.get mempty
 
+-- | Creates a new GET request, with query parameters.
+get' :: ByteString -- ^ The url to request.
+     -> Map ByteString [ByteString] -- ^ The parameters to send.
+     -> TestRequest
+get' = Test.get
+
 -- | Creates a new POST request, with a set of parameters.
 post :: ByteString                  -- ^ The url to request.
      -> Map ByteString [ByteString] -- ^ The parameters to send.
@@ -210,8 +217,8 @@ params = fromList . map (\x -> (fst x, [snd x]))
 
 -- | Checks that the handler evaluates to the given value.
 equals :: (Show a, Eq a) => a -- ^ Value to compare against
-          -> Handler b b a    -- ^ Handler that should evaluate to the same thing
-          -> SnapTesting b ()
+       -> Handler b b a       -- ^ Handler that should evaluate to the same thing
+       -> SnapTesting b ()
 equals a ha = do
   b <- eval ha
   res <- testEqual "Expected value to equal " a b
@@ -243,8 +250,8 @@ redirectsto req uri = run req (testRedirectTo $ encodeUtf8 uri)
 -- >                             [ ("new_user.name", "Jane")
 -- >                             , ("new_user.email", "jdoe@c.com")
 -- >                             , ("new_user.password", "foobar")])
-changes :: (Show a, Eq a) =>
-           (a -> a)      -- ^ Change function
+changes :: (Show a, Eq a)
+        => (a -> a)      -- ^ Change function
         -> Handler b b a -- ^ Monadic value
         -> TestRequest   -- ^ Request to run.
         -> SnapTesting b ()
