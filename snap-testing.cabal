@@ -2,7 +2,7 @@
 -- documentation, see http://haskell.org/cabal/users-guide/
 
 name:                snap-testing
-version:             0.2.0.1
+version:             0.3.0.0
 synopsis:            A library for BDD-style testing with the Snap Web Framework
 -- description:
 homepage:            https://github.com/dbp/snap-testing
@@ -29,4 +29,6 @@ library
                        text == 0.11.*,
                        bytestring >= 0.9.1 && < 0.11,
                        containers == 0.5.*,
-                       process == 1.1.*
+                       process == 1.1.*,
+                       io-streams == 1.*,
+                       async == 2.*

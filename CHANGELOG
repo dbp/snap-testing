@@ -1,3 +1,7 @@
+0.3.0.0 - 2014-3-5 - Switch to streaming interface for report generators.
+ * Streams uses io-streams (a soon-to-be dependency of snap), and allow
+	test results to be reported immediately, not only at the end of the test run.
+
 0.2.1.0 - 2014-2-11 - Add support for get requests with parameters.
 
 0.2.0.1 - 2014-2-3 - Fix bug in redirectsto.

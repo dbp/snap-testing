@@ -1,53 +1,11 @@
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
 
-{-|
-
-This library allows you to write tests against handlers, checking
-response codes and bodies, modifications of state, etc. The tests are written
-in a hierarchical fashion, with labels to help organize them, and
-various ways of reporting on the results of testing are possible.
-
-All of the tests are run in the "test" environment, so be sure to
-create the corresponding .cfg files and databases, etc.
-
-Here is a complete example (where routes are your applications routes, and
-app is your site initializer):
-
-> runSnapTests [consoleReport, desktopReport] (route routes) app $ do
->   name "/auth/new_user" $ do
->     name "success" $
->       succeeds (get "/auth/new_user")
->     name "creates a new account" $
->       cleanup clearAccounts $
->       changes (+1) countAccounts (post "/auth/new_user" $ params
->                                   [ ("new_user.name", "Jane")
->                                   , ("new_user.email", "jdoe@c.com")
->                                   , ("new_user.password", "foobar")])
-
-There are many different predicates available (and a basic way of
-integrating QuickCheck), and it is relatively easy to add
-functionality on top of what is built in. For example, to add a way of
-creating users and logging in as them for a block of tests you could
-do the following (this is using the auth snaplet - if you are doing
-somethinge else, obviously the `with auth ...` line would be
-different):
-
-> withUser :: SnapTesting App a -> SnapTesting App a
-> withUser = modifySite $ \site -> do
->   au <- fmap fromJust getRandomUser
->   with auth $ forceLogin au
->   site
-
-Where `getRandomUser` is a function written in your applications
-handler (using whatever state needed).
-
--}
 module Snap.Test.BDD
        (
        -- * Types
          SnapTesting
        , TestRequest
-       , TestResult(..)
+       , TestLog
 
        -- * Running tests
        , runSnapTests
@@ -94,7 +52,7 @@ import           Data.ByteString (ByteString, isInfixOf)
 import           Data.Text (Text, pack, unpack)
 import qualified Data.Text as T (append)
 import           Data.Text.Encoding (encodeUtf8)
-import           Data.Monoid (mempty)
+import           Data.Monoid (mempty, mconcat)
 import           Data.Maybe (fromMaybe)
 import           Control.Monad (liftM, zipWithM, void)
 import           Control.Monad.Trans
@@ -109,89 +67,103 @@ import           Snap.Test (RequestBuilder, getResponseBody)
 import qualified Snap.Test as Test
 import           Snap.Snaplet.Test (runHandler, evalHandler)
 import           Test.QuickCheck (Args(..), Result(..), Testable, quickCheckWithResult, stdArgs)
+import           System.IO.Streams (InputStream, OutputStream)
+import qualified System.IO.Streams as S
+import qualified System.IO.Streams.Concurrent as S
+import           Control.Concurrent.Async
 
 -- | The main type for this library, where `b` is your application state,
 -- often called `App`. This is a State and Writer monad on top of IO, where the State carries
 -- your application (or, more specifically, a top-level handler), and the Writer allows tests
 -- to be reported as passing or failing.
-type SnapTesting b a = WriterT [TestLog] (StateT (Handler b b (), SnapletInit b b) IO) a
+type SnapTesting b a = StateT (Handler b b (), SnapletInit b b, OutputStream TestLog) IO a
 
 -- | TestRequests are created with `get` and `post`.
 type TestRequest = RequestBuilder IO ()
 
--- | TestResults are what are used to write report generators (two are included). The result
--- is a tree structure.
-data TestResult = ResultName Text [TestResult] | ResultPass Text | ResultFail Text
--- TestLog is the flat datastructure that will be turned into the TestResult tree
+-- | TestLog is what is streamed to report generators. It is a flatten tree structure.
 data TestLog = NameStart Text | NameEnd | TestPass Text | TestFail Text deriving Show
 
+-- | dupN duplicates an input stream N times
+dupN :: Int -> InputStream a -> IO [InputStream a]
+dupN 0 s = return []
+dupN 1 s = return [s]
+dupN n s = do (a, b) <- S.map (\x -> (x,x)) s >>= S.unzip
+              rest <- dupN (n - 1) b
+              return (a:rest)
+
 -- | Run a set of tests, putting the results through the specified report generators
-runSnapTests :: [[TestResult] -> IO ()] -- ^ Report generators
-                -> Handler b b ()       -- ^ Site that requests are run against (often route routes, where routes are your sites routes).
-                -> SnapletInit b b      -- ^ Site initializer
-                -> SnapTesting b ()     -- ^ Block of tests
-                -> IO ()
+runSnapTests :: [InputStream TestLog -> IO ()] -- ^ Report generators
+             -> Handler b b ()                 -- ^ Site that requests are run against (often route routes, where routes are your sites routes).
+             -> SnapletInit b b                -- ^ Site initializer
+             -> SnapTesting b ()               -- ^ Block of tests
+             -> IO ()
 runSnapTests rgs site app tests = do
-  testlog <- liftM snd $ evalStateT (runWriterT tests) (site, app)
-  let res = fst $ buildResult [] testlog
-  _ <- zipWithM ($) rgs (repeat res)
+  (inp, out) <- S.makeChanPipe
+  istreams <- dupN (length rgs) inp
+  consumers <- mapM (\(inp, hndl) -> async (hndl inp)) (zip istreams rgs)
+  evalStateT tests (site, app, out)
+  S.write Nothing out
+  mapM_ wait consumers
   return ()
 
-buildResult :: [TestResult] -> [TestLog] -> ([TestResult], [TestLog])
-buildResult acc [] = (acc, [])
-buildResult acc ((NameStart nm):xs) =
-  let (cur, rest) = buildResult [] xs in
-  buildResult (acc ++ [(ResultName nm cur)]) rest
-buildResult acc (NameEnd:xs) = (acc, xs)
-buildResult acc ((TestPass desc):xs) = buildResult (acc ++ [ResultPass desc]) xs
-buildResult acc ((TestFail desc):xs) = buildResult (acc ++ [ResultFail desc]) xs
 
 -- | Prints test results to the console. For example:
 --
 -- > /auth/new_user
--- >  success
--- >    PASSED
--- >  creates a new account
--- >    PASSED
-consoleReport :: [TestResult] -> IO ()
-consoleReport = cg 0
-  where cg _ [] = return ()
-        cg indent (ResultName n children : xs) = do
-          fmt indent n
-          cg (indent + 2) children
-          cg indent xs
-        cg indent (ResultPass n : xs) = do
-          fmt indent (T.append "PASSED " n)
-          cg indent xs
-        cg indent (ResultFail n : xs) = do
-          fmt indent (T.append "FAILED: " n)
-          cg indent xs
-        fmt indent t = putStrLn $ replicate indent ' ' ++ unpack t
+-- >  success PASSED
+-- >  creates a new account PASSED
+consoleReport :: InputStream TestLog -> IO ()
+consoleReport stream = cr 0
+  where cr indent = do log <- S.read stream
+                       case log of
+                         Nothing -> return ()
+                         Just (NameStart n) -> do putStrLn ""
+                                                  printIndent indent
+                                                  putStr (unpack n)
+                                                  cr (indent + indentUnit)
+                         Just (NameEnd) -> cr (indent - indentUnit)
+                         Just (TestPass n) -> do putStr " PASSED"
+                                                 cr indent
+                         Just (TestFail er) -> do putStr " FAILED"
+                                                  cr indent
+        indentUnit = 2
+        printIndent n = putStr (replicate n ' ')
+
 
 -- | Sends the test results to desktop notifications on linux. Prints how many tests passed and failed.
-linuxDesktopReport ::  [TestResult] -> IO ()
-linuxDesktopReport res = do
+linuxDesktopReport :: InputStream TestLog -> IO ()
+linuxDesktopReport stream = do
+  res <- S.toList stream
   let (passed, total) = count res
   case passed == total of
     True ->
-      void $ system $ "notify-send -u low -t 2000 'All Tests Passing' 'All " ++ (show total) ++ " tests passed.'"
+      void $ system $ "notify-send -u low -t 2000 'All Tests Passing' 'All " ++
+                       (show total) ++ " tests passed.'"
     False ->
-      void $ system $ "notify-send -u normal -t 2000 'Some Tests Failing' '" ++ (show (total - passed)) ++ " out of " ++ (show total) ++ " tests failed.'"
+      void $ system $ "notify-send -u normal -t 2000 'Some Tests Failing' '" ++
+                      (show (total - passed)) ++ " out of " ++
+                      (show total) ++ " tests failed.'"
  where count [] = (0, 0)
-       count (ResultName _ children : xs) = count (children ++ xs)
-       count (ResultPass _ : xs) = let (p, t) = count xs
-                                   in (1 + p, 1 + t)
-       count (ResultFail _ : xs) = let (p, t) = count xs
-                                   in (p, 1 + t)
+       count (TestPass _ : xs) = let (p, t) = count xs
+                                 in (1 + p, 1 + t)
+       count (TestFail _ : xs) = let (p, t) = count xs
+                                 in (p, 1 + t)
+       count (_ : xs) = count xs
+
+writeRes :: TestLog -> SnapTesting b ()
+writeRes log = do (_,_,out) <- S.get
+                  lift $ S.write (Just log) out
 
 -- | Labels a block of tests with a descriptive name, to be used in report generation.
 name :: Text              -- ^ Name of block
      -> SnapTesting b ()  -- ^ Block of tests
      -> SnapTesting b ()
 name s a = do
-  tell [NameStart s]
+  (_,_,out) <- S.get
+  writeRes (NameStart s)
   a
-  tell [NameEnd]
+  writeRes NameEnd
 
 -- | Creates a new GET request.
 get :: ByteString -- ^ The url to request.
@@ -222,7 +194,7 @@ equals :: (Show a, Eq a) => a -- ^ Value to compare against
 equals a ha = do
   b <- eval ha
   res <- testEqual "Expected value to equal " a b
-  tell [res]
+  writeRes res
 
 -- | Checks that the given request results in a success (200) code.
 succeeds :: TestRequest -> SnapTesting b ()
@@ -256,7 +228,7 @@ changes :: (Show a, Eq a)
         -> TestRequest   -- ^ Request to run.
         -> SnapTesting b ()
 changes delta measure req = do
-  (site, app) <- lift S.get
+  (site, app, _) <- S.get
   changes' delta measure (liftIO $ runHandlerSafe req site app)
 
 -- | A more general variant of `changes` that allows an arbitrary block instead of a request.
@@ -270,7 +242,7 @@ changes' delta measure act = do
   _ <- act
   after <- eval measure
   res <- testEqual "Expected value to change" (delta before) after
-  tell [res]
+  writeRes res
 
 -- | Checks that the response body of a given request contains some text.
 contains :: TestRequest -- ^ Request to run
@@ -290,7 +262,7 @@ cleanup :: Handler b b ()   -- ^ Action to run after tests
         -> SnapTesting b ()
 cleanup cu act = do
   act
-  (_, app) <- lift S.get
+  (_, app, _) <- S.get
   _ <- liftIO $ runHandlerSafe (get "") cu app
   return ()
 
@@ -298,7 +270,7 @@ cleanup cu act = do
 eval :: Handler b b a -- ^ Action to evaluate
      -> SnapTesting b a
 eval act = do
-  (_, app) <- lift S.get
+  (_, app, _) <- S.get
   liftIO $ fmap (either (error. unpack) id) $ evalHandlerSafe act app
 
 
@@ -307,10 +279,10 @@ modifySite :: (Handler b b () -> Handler b b ()) -- ^ Site modification function
            -> SnapTesting b a -- ^ Tests to run
            -> SnapTesting b a
 modifySite f act = do
-  (site, app) <- lift S.get
-  lift $ S.put (f site, app)
+  (site, app, out) <- S.get
+  S.put (f site, app, out)
   res <- act
-  lift $ S.put (site, app)
+  S.put (site, app, out)
   return res
 
 -- | Allows you to run a quickcheck test. All 100 test passing counts as a pass, any failure a failure.
@@ -319,10 +291,10 @@ quickCheck :: Testable prop => prop -> SnapTesting b ()
 quickCheck p = do
   res <- liftIO $ quickCheckWithResult (stdArgs { chatty = False }) p
   case res of
-    Success{} -> tell [TestPass ""]
-    GaveUp{} -> tell [TestPass ""]
-    Failure{} -> tell [TestFail ""]
-    NoExpectedFailure{} -> tell [TestFail ""]
+    Success{} -> writeRes (TestPass "")
+    GaveUp{} -> writeRes (TestPass "")
+    Failure{} -> writeRes (TestFail "")
+    NoExpectedFailure{} -> writeRes (TestFail "")
 
 -- Private helpers
 runHandlerSafe :: TestRequest -> Handler b b v -> SnapletInit b b -> IO (Either Text Response)
@@ -336,13 +308,13 @@ evalHandlerSafe act app =
 
 run :: TestRequest -> (Response -> SnapTesting b TestLog) -> SnapTesting b ()
 run req asrt = do
-  (site, app) <- lift S.get
+  (site, app, _) <- S.get
   res <- liftIO $ runHandlerSafe req site app
   case res of
-    Left err -> tell [TestFail $ T.append "Handler returned an error: " err]
+    Left err -> writeRes (TestFail $ T.append "Handler returned an error: " err)
     Right response -> do
       testlog <- asrt response
-      tell [testlog]
+      writeRes testlog
 
 -- Low level matchers - these parallel HUnit assertions in Snap.Test
 
