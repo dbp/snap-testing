@@ -90,7 +90,7 @@ type SnapTesting b a = StateT (Handler b b (), SnapletInit b b, OutputStream Tes
 type TestRequest = RequestBuilder IO ()
 
 -- | TestLog is what is streamed to report generators. It is a flatten tree structure.
-data TestLog = NameStart Text | NameEnd | TestPass Text | TestFail Text deriving Show
+data TestLog = NameStart Text | NameEnd | TestPass Text | TestFail Text | TestError Text deriving Show
 
 data SnapTestingConfig = SnapTestingConfig { reportGenerators :: [InputStream TestLog -> IO ()]
                                            , watchDirectories :: [FilePath]
@@ -163,6 +163,10 @@ consoleReport stream = cr 0
                                                  cr indent
                          Just (TestFail _) -> do putStr " FAILED"
                                                  cr indent
+                         Just (TestError msg) -> do putStr " ERROR("
+                                                    putStr (unpack msg)
+                                                    putStr ")"
+                                                    cr indent
         indentUnit = 2
         printIndent n = putStr (replicate n ' ')
 
@@ -186,6 +190,8 @@ linuxDesktopReport stream = do
                                  in (1 + p, 1 + t)
        count (TestFail _ : xs) = let (p, t) = count xs
                                  in (p, 1 + t)
+       count (TestError _ : xs) = let (p, t) = count xs
+                                  in (p, 1 + t)
        count (_ : xs) = count xs
 
 writeRes :: TestLog -> SnapTesting b ()
@@ -308,7 +314,7 @@ eval :: Handler b b a -- ^ Action to evaluate
      -> SnapTesting b a
 eval act = do
   (_, app, _) <- S.get
-  liftIO $ fmap (either (error. unpack) id) $ evalHandlerSafe act app
+  liftIO $ fmap (either (error . unpack) id) $ evalHandlerSafe act app
 
 
 -- | Given a site to site function (like, generating a random user and logging in), run the given block of test with the modified state.
@@ -348,7 +354,7 @@ run req asrt = do
   (site, app, _) <- S.get
   res <- liftIO $ runHandlerSafe req site app
   case res of
-    Left err -> writeRes (TestFail $ T.append "Handler returned an error: " err)
+    Left err -> writeRes (TestError err)
     Right response -> do
       testlog <- asrt response
       writeRes testlog
