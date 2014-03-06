@@ -55,11 +55,11 @@ import           Prelude hiding (FilePath)
 import           Data.Map (Map, fromList)
 import           Data.ByteString (ByteString, isInfixOf)
 import           Data.Text (Text, pack, unpack)
-import qualified Data.Text as T (append)
+import qualified Data.Text as T (append, isInfixOf)
 import           Data.Text.Encoding (encodeUtf8)
 import           Data.Monoid (mempty)
 import           Data.Maybe (fromMaybe)
-import           Control.Monad (void)
+import           Control.Monad (void, unless)
 import           Control.Monad.Trans
 import           Control.Monad.Trans.State (StateT, evalStateT)
 import qualified Control.Monad.Trans.State as S (get, put)
@@ -93,11 +93,14 @@ type TestRequest = RequestBuilder IO ()
 data TestLog = NameStart Text | NameEnd | TestPass Text | TestFail Text deriving Show
 
 data SnapTestingConfig = SnapTestingConfig { reportGenerators :: [InputStream TestLog -> IO ()]
-                                           , watchDirectories :: [FilePath] }
+                                           , watchDirectories :: [FilePath]
+                                           , ignorePatterns :: [Text]
+                                           }
 
 defaultConfig :: SnapTestingConfig
 defaultConfig = SnapTestingConfig { reportGenerators = [consoleReport]
                                   , watchDirectories = []
+                                  , ignorePatterns = []
                                   }
 
 -- | dupN duplicates an input stream N times
@@ -132,7 +135,8 @@ runSnapTests conf site app tests = do
                       S.write Nothing out
                       mapM_ wait consumers
                       return ()
-        triggerRun mv _ = void $ tryPutMVar mv ()
+        triggerRun mv f = unless (any (`T.isInfixOf` (pack (show f))) (ignorePatterns conf))
+                                 (void $ tryPutMVar mv ())
         testRunner mv = do _ <- takeMVar mv
                            runTests
                            testRunner mv
@@ -149,7 +153,7 @@ consoleReport :: InputStream TestLog -> IO ()
 consoleReport stream = cr 0
   where cr indent = do logRes <- S.read stream
                        case logRes of
-                         Nothing -> return ()
+                         Nothing -> putStrLn ""
                          Just (NameStart n) -> do putStrLn ""
                                                   printIndent indent
                                                   putStr (unpack n)
