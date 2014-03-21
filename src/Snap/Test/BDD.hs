@@ -5,7 +5,7 @@ module Snap.Test.BDD
        -- * Types
          SnapTesting
        , TestRequest
-       , TestLog
+       , TestLog(..)
        , SnapTestingConfig (..)
 
        -- * Configuration
@@ -35,8 +35,15 @@ module Snap.Test.BDD
        , contains
        , notcontains
 
+       -- * Form tests
+       , FormExpectations(..)
+       , form
+
        -- * Stateful unit tests
        , equals
+
+       -- * Pure unit tests
+       , assert
 
        -- * Run actions after block
        , cleanup
@@ -55,11 +62,12 @@ import           Prelude hiding (FilePath)
 import           Data.Map (Map, fromList)
 import           Data.ByteString (ByteString, isInfixOf)
 import           Data.Text (Text, pack, unpack)
-import qualified Data.Text as T (append, isInfixOf)
+import qualified Data.Text as T (append)
 import           Data.Text.Encoding (encodeUtf8)
-import           Data.Monoid (mempty, mconcat)
+import           Data.Monoid (mempty)
 import           Data.Maybe (fromMaybe)
-import           Control.Monad (void, unless)
+import qualified Data.Map as M (lookup, mapKeys)
+import           Control.Monad (void)
 import           Control.Monad.Trans
 import           Control.Monad.Trans.State (StateT, evalStateT)
 import qualified Control.Monad.Trans.State as S (get, put)
@@ -75,10 +83,11 @@ import           System.IO.Streams (InputStream, OutputStream)
 import qualified System.IO.Streams as S
 import qualified System.IO.Streams.Concurrent as S
 import           Control.Concurrent.Async
+import qualified Text.Digestive as DF
 
 -- | The main type for this library, where `b` is your application state,
--- often called `App`. This is a State and Writer monad on top of IO, where the State carries
--- your application (or, more specifically, a top-level handler), and the Writer allows tests
+-- often called `App`. This is a State monad on top of IO, where the State carries
+-- your application (or, more specifically, a top-level handler), and stream of test results
 -- to be reported as passing or failing.
 type SnapTesting b a = StateT (Handler b b (), SnapletInit b b, OutputStream TestLog) IO a
 
@@ -215,6 +224,34 @@ equals a ha = do
   b <- eval ha
   res <- testEqual "Expected value to equal " a b
   writeRes res
+
+-- | Helper to bring the results of other tests into the test suite.
+assert :: Bool -> SnapTesting b ()
+assert b = equals b (return True)
+
+-- | A data type for tests against forms
+data FormExpectations a = Value a           -- ^ the value the form should take (and should be valid)
+                        | ErrorPaths [Text] -- ^ the error paths that should be populated
+
+-- | Test against digestive-functors forms
+form :: (Eq a, Show a)
+     => FormExpectations a           -- ^ If the form should succeed, Value a is what it should produce.
+                                     --   If failing, ErrorPaths should be all the errors that are triggered.
+     -> DF.Form Text (Handler b b) a -- ^ The form to run
+     -> (Map Text Text)              -- ^ The parameters to pass
+     -> SnapTesting b ()
+form expected theForm theParams =
+  do r <- eval $ DF.postForm "form" theForm (const $ return lookupParam)
+     case expected of
+       Value a -> equals (snd r) (return $ Just a)
+       ErrorPaths expectedPaths ->
+         do let viewErrorPaths = map (DF.fromPath . fst) $ DF.viewErrors $ fst r
+            assert (all (`elem` viewErrorPaths) expectedPaths
+                    && ((length viewErrorPaths) == (length expectedPaths)))
+  where lookupParam pth = case M.lookup (DF.fromPath pth) fixedParams of
+                            Nothing -> return []
+                            Just v -> return [DF.TextInput v]
+        fixedParams = M.mapKeys (T.append "form.") theParams
 
 -- | Checks that the given request results in a success (200) code.
 succeeds :: TestRequest -> SnapTesting b ()
