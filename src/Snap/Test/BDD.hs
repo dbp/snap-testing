@@ -229,16 +229,16 @@ equals a ha = do
 assert :: Bool -> SnapTesting b ()
 assert b = equals b (return True)
 
--- | A data type for tests against forms
-data FormExpectations a = Value a           -- ^ the value the form should take (and should be valid)
-                        | ErrorPaths [Text] -- ^ the error paths that should be populated
+-- | A data type for tests against forms.
+data FormExpectations a = Value a           -- ^ The value the form should take (and should be valid)
+                        | ErrorPaths [Text] -- ^ The error paths that should be populated
 
--- | Test against digestive-functors forms
+-- | Test against digestive-functors forms.
 form :: (Eq a, Show a)
      => FormExpectations a           -- ^ If the form should succeed, Value a is what it should produce.
                                      --   If failing, ErrorPaths should be all the errors that are triggered.
      -> DF.Form Text (Handler b b) a -- ^ The form to run
-     -> (Map Text Text)              -- ^ The parameters to pass
+     -> Map Text Text                -- ^ The parameters to pass
      -> SnapTesting b ()
 form expected theForm theParams =
   do r <- eval $ DF.postForm "form" theForm (const $ return lookupParam)
@@ -247,7 +247,7 @@ form expected theForm theParams =
        ErrorPaths expectedPaths ->
          do let viewErrorPaths = map (DF.fromPath . fst) $ DF.viewErrors $ fst r
             assert (all (`elem` viewErrorPaths) expectedPaths
-                    && ((length viewErrorPaths) == (length expectedPaths)))
+                    && (length viewErrorPaths == length expectedPaths))
   where lookupParam pth = case M.lookup (DF.fromPath pth) fixedParams of
                             Nothing -> return []
                             Just v -> return [DF.TextInput v]

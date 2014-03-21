@@ -1,3 +1,5 @@
+0.4.1.1 - 2014-3-20 - Add this changelog to hackage, grammar in comments.
+
 0.4.1.0 - 2014-3-20 - Add form tests, assert.
   * Add form test utility that runs digestive forms against values and checks that they
 	either produce a given value (one form of test) or produce a set of errors

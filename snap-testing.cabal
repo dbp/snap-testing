@@ -1,12 +1,12 @@
 name:                snap-testing
-version:             0.4.1.0
+version:             0.4.1.1
 synopsis:            A library for BDD-style testing with the Snap Web Framework
 homepage:            https://github.com/dbp/snap-testing
 license:             BSD3
 license-file:        LICENSE
 author:              Daniel Patterson
 maintainer:          dbp@dbpmail.net
--- copyright:
+extra-source-files: CHANGELOG
 category:            Web, Snap
 build-type:          Simple
 cabal-version:       >=1.8
