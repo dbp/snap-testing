@@ -85,10 +85,11 @@ import           Control.Concurrent.Async
 import           System.Process (system)
 
 import           Snap.Core (Response(..), getHeader)
-import           Snap.Snaplet (Handler, SnapletInit)
+import           Snap.Snaplet (Handler, SnapletInit, Snaplet)
 import           Snap.Test (RequestBuilder, getResponseBody)
 import qualified Snap.Test as Test
-import           Snap.Snaplet.Test (runHandler, evalHandler)
+import           Snap.Snaplet.Test (runHandler', evalHandler', getSnaplet
+                                   , closeSnaplet, InitializerState)
 import           Test.QuickCheck (Args(..), Result(..), Testable, quickCheckWithResult, stdArgs)
 
 import           System.IO.Streams (InputStream, OutputStream)
@@ -103,7 +104,9 @@ import qualified Text.XML.HXT.Core as HXT
 -- often called `App`. This is a State monad on top of IO, where the State carries
 -- your application (or, more specifically, a top-level handler), and stream of test results
 -- to be reported as passing or failing.
-type SnapTesting b a = StateT (Handler b b (), SnapletInit b b, OutputStream TestResult) IO a
+type SnapTesting b a = StateT (Handler b b ()
+                              , (Snaplet b, InitializerState b)
+                              , OutputStream TestResult) IO a
 
 data TestResponse = Html Text | NotFound | Redirect Int Text | Other Int | Empty
 
@@ -149,10 +152,15 @@ runSnapTests conf site app tests = do
   let rgs = reportGenerators conf
   istreams <- dupN (length rgs) inp
   consumers <- mapM (\(inp', hndl) -> async (hndl inp')) (zip istreams rgs)
-  evalStateT tests (site, app, out)
-  Stream.write Nothing out
-  mapM_ wait consumers
-  return ()
+  init <- getSnaplet (Just "test") app
+  case init of
+    Left err -> error $ show err
+    Right (snaplet, initstate) -> do
+      evalStateT tests (site, (snaplet, initstate), out)
+      Stream.write Nothing out
+      mapM_ wait consumers
+      closeSnaplet initstate
+      return ()
 
 
 -- | Prints test results to the console. For example:
@@ -422,10 +430,15 @@ quickCheck p = do
     NoExpectedFailure{} -> writeRes (TestFail (Positive ""))
 
 -- Private helpers
-runHandlerSafe :: RequestBuilder IO () -> Handler b b v -> SnapletInit b b -> IO (Either Text Response)
-runHandlerSafe req site app =
-  catch (runHandler (Just "test") req site app) (\(e::SomeException) -> return $ Left (pack $ show e))
+runHandlerSafe :: RequestBuilder IO ()
+               -> Handler b b v
+               -> (Snaplet b, InitializerState b)
+               -> IO (Either Text Response)
+runHandlerSafe req site (s, is) =
+  catch (runHandler' s is req site) (\(e::SomeException) -> return $ Left (pack $ show e))
 
-evalHandlerSafe :: Handler b b v -> SnapletInit b b -> IO (Either Text v)
-evalHandlerSafe act app =
-  catch (evalHandler (Just "test") (Test.get "" M.empty) act app) (\(e::SomeException) -> return $ Left (pack $ show e))
+evalHandlerSafe :: Handler b b v
+                -> (Snaplet b, InitializerState b)
+                -> IO (Either Text v)
+evalHandlerSafe act (s, is) =
+  catch (evalHandler' s is (Test.get "" M.empty) act) (\(e::SomeException) -> return $ Left (pack $ show e))
