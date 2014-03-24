@@ -62,11 +62,12 @@ import           Prelude hiding (FilePath)
 import           Data.Map (Map, fromList)
 import           Data.ByteString (ByteString, isInfixOf)
 import           Data.Text (Text, pack, unpack)
-import qualified Data.Text as T (append)
+import qualified Data.Text as T (append, concat)
 import           Data.Text.Encoding (encodeUtf8)
 import           Data.Monoid (mempty)
 import           Data.Maybe (fromMaybe)
 import qualified Data.Map as M (lookup, mapKeys)
+import           Data.List (intercalate, intersperse)
 import           Control.Monad (void)
 import           Control.Monad.Trans
 import           Control.Monad.Trans.State (StateT, evalStateT)
@@ -162,23 +163,26 @@ consoleReport stream = cr 0
 linuxDesktopReport :: InputStream TestLog -> IO ()
 linuxDesktopReport stream = do
   res <- S.toList stream
-  let (passed, total) = count res
-  case passed == total of
-    True ->
+  let (failing, total) = count [] res
+  case failing of
+    [] ->
       void $ system $ "notify-send -u low -t 2000 'All Tests Passing' 'All " ++
                        (show total) ++ " tests passed.'"
-    False ->
+    _ ->
       void $ system $ "notify-send -u normal -t 2000 'Some Tests Failing' '" ++
-                      (show (total - passed)) ++ " out of " ++
-                      (show total) ++ " tests failed.'"
- where count [] = (0, 0)
-       count (TestPass _ : xs) = let (p, t) = count xs
-                                 in (1 + p, 1 + t)
-       count (TestFail _ : xs) = let (p, t) = count xs
-                                 in (p, 1 + t)
-       count (TestError _ : xs) = let (p, t) = count xs
-                                  in (p, 1 + t)
-       count (_ : xs) = count xs
+                      (show (length failing)) ++ " out of " ++
+                      (show total) ++ " tests failed:\n\n" ++ (intercalate "\n\n" $ reverse failing) ++ "'"
+ where count :: [Text] -> [TestLog] -> ([String], Int)
+       count _ [] = ([], 0)
+       count n (TestPass _ : xs) = let (f, t) = count n xs
+                                   in (f, 1 + t)
+       count n (TestFail _ : xs) = let (f, t) = count n xs
+                                   in (f ++ [unpack $ T.concat $ intersperse " > " $ reverse n], 1 + t)
+       count n (TestError _ : xs) = let (f, t) = count n xs
+                                    in (f, 1 + t)
+       count n (NameStart nm : xs) = count (nm:n) xs
+       count n (NameEnd : xs) = count (tail n) xs
+       count n (_ : xs) = count n xs
 
 writeRes :: TestLog -> SnapTesting b ()
 writeRes log = do (_,_,out) <- S.get
