@@ -41,6 +41,7 @@ module Snap.Test.BDD
 
        -- * Stateful unit tests
        , equals
+       , notequals
 
        -- * Pure unit tests
        , assert
@@ -60,7 +61,7 @@ module Snap.Test.BDD
 
 import           Prelude hiding (FilePath)
 import           Data.Map (Map, fromList)
-import           Data.ByteString (ByteString, isInfixOf)
+import           Data.ByteString (ByteString, isInfixOf, isPrefixOf)
 import           Data.Text (Text, pack, unpack)
 import qualified Data.Text as T (append, concat)
 import           Data.Text.Encoding (encodeUtf8)
@@ -74,8 +75,8 @@ import           Control.Monad.Trans.State (StateT, evalStateT)
 import qualified Control.Monad.Trans.State as S (get, put)
 import           Control.Exception (SomeException, catch)
 import           System.Process (system)
-import           Snap.Core (Response(..), getHeader)
-import           Snap.Snaplet (Handler, SnapletInit)
+import           Snap.Core (Response(..), getHeader, listHeaders)
+import           Snap.Snaplet (Handler, SnapletInit, Snaplet)
 import           Snap.Test (RequestBuilder, getResponseBody)
 import qualified Snap.Test as Test
 import           Snap.Snaplet.Test (runHandler, evalHandler)
@@ -140,7 +141,7 @@ consoleReport :: InputStream TestLog -> IO ()
 consoleReport stream = cr 0
   where cr indent = do log <- S.read stream
                        case log of
-                         Nothing -> return ()
+                         Nothing -> putStrLn "" >> return ()
                          Just (NameStart n) -> do putStrLn ""
                                                   printIndent indent
                                                   putStr (unpack n)
@@ -227,6 +228,15 @@ equals :: (Show a, Eq a) => a -- ^ Value to compare against
 equals a ha = do
   b <- eval ha
   res <- testEqual "Expected value to equal " a b
+  writeRes res
+
+-- | Checks that the handler does not evaluate to the given value.
+notequals :: (Show a, Eq a) => a -- ^ Value to compare against
+          -> Handler b b a       -- ^ Handler that should not evaluate to the same thing
+          -> SnapTesting b ()
+notequals a ha = do
+  b <- eval ha
+  res <- testNotEqual "Did not expect value to equal " a b
   writeRes res
 
 -- | Helper to bring the results of other tests into the test suite.
@@ -382,6 +392,9 @@ run req asrt = do
 testEqual :: (Eq a, Show a) => Text -> a -> a -> SnapTesting b TestLog
 testEqual msg a b = return $ if a == b then TestPass "" else TestFail msg
 
+testNotEqual :: (Eq a, Show a) => Text -> a -> a -> SnapTesting b TestLog
+testNotEqual msg a b = return $ if a /= b then TestPass "" else TestFail msg
+
 testBool :: Text -> Bool -> SnapTesting b TestLog
 testBool msg b = return $ if b then TestPass "" else TestFail msg
 
@@ -402,7 +415,10 @@ testRedirectTo :: ByteString
                   -> SnapTesting b TestLog
 testRedirectTo uri rsp = do
     testRedirect rsp
-    testEqual message uri rspUri
+    liftIO $ print (listHeaders rsp)
+    return $ if uri `isPrefixOf` rspUri
+               then TestPass ""
+               else TestFail message
   where
     rspUri = fromMaybe "" $ getHeader "Location" rsp
     message = pack $ "Expected redirect to " ++ show uri
