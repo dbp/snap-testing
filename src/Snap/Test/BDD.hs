@@ -4,8 +4,8 @@ module Snap.Test.BDD
        (
        -- * Types
          SnapTesting
-       , TestRequest
-       , TestLog(..)
+       , TestResult(..)
+       , TestResponse(..)
        , SnapTestingConfig (..)
 
        -- * Configuration
@@ -19,37 +19,43 @@ module Snap.Test.BDD
        -- * Labeling
        , name
 
-       -- * Creating Requests
+       -- * Applying Predicates
+       , should
+       , shouldNot
+
+       -- * Helpers for running tests
+       , css
+       , val
+
+       -- * Getting Responses
        , get
        , get'
        , post
        , params
 
-       -- * Request predicates
-       , succeeds
-       , notfound
-       , redirects
-       , redirectsto
-       , changes
-       , changes'
-       , contains
-       , notcontains
+       -- * Predicates on values
+       , equal
+       , beTrue
 
-       -- * Form tests
+       -- * Predicates on Responses
+       , succeed
+       , notfound
+       , redirect
+       , redirectTo
+       , haveText
+       , haveSelector
+
+       -- * Stateful value tests
+       , changes
+
+       -- * Stateful form tests
        , FormExpectations(..)
        , form
-
-       -- * Stateful unit tests
-       , equals
-       , notequals
-
-       -- * Pure unit tests
-       , assert
 
        -- * Run actions after block
        , cleanup
 
-       -- * Evaluate arbitrary action
+       -- * Evaluating arbitrary actions
        , eval
 
        -- * Create helpers
@@ -59,48 +65,65 @@ module Snap.Test.BDD
        , quickCheck
        ) where
 
-import           Prelude hiding (FilePath)
-import           Data.Map (Map, fromList)
-import           Data.ByteString (ByteString, isInfixOf, isPrefixOf)
+import           Prelude hiding (FilePath, log)
+import           Data.Map (Map)
+import qualified Data.Map as M (lookup, mapKeys, empty, fromList)
+import           Data.ByteString (ByteString)
 import           Data.Text (Text, pack, unpack)
-import qualified Data.Text as T (append, concat)
-import           Data.Text.Encoding (encodeUtf8)
-import           Data.Monoid (mempty)
+import qualified Data.Text as T (append, concat, isInfixOf)
+import           Data.Text.Encoding (encodeUtf8, decodeUtf8)
 import           Data.Maybe (fromMaybe)
-import qualified Data.Map as M (lookup, mapKeys)
 import           Data.List (intercalate, intersperse)
+
+import           Control.Applicative
 import           Control.Monad (void)
 import           Control.Monad.Trans
 import           Control.Monad.Trans.State (StateT, evalStateT)
 import qualified Control.Monad.Trans.State as S (get, put)
 import           Control.Exception (SomeException, catch)
+import           Control.Concurrent.Async
 import           System.Process (system)
-import           Snap.Core (Response(..), getHeader, listHeaders)
-import           Snap.Snaplet (Handler, SnapletInit, Snaplet)
+
+import           Snap.Core (Response(..), getHeader)
+import           Snap.Snaplet (Handler, SnapletInit)
 import           Snap.Test (RequestBuilder, getResponseBody)
 import qualified Snap.Test as Test
 import           Snap.Snaplet.Test (runHandler, evalHandler)
 import           Test.QuickCheck (Args(..), Result(..), Testable, quickCheckWithResult, stdArgs)
+
 import           System.IO.Streams (InputStream, OutputStream)
-import qualified System.IO.Streams as S
-import qualified System.IO.Streams.Concurrent as S
-import           Control.Concurrent.Async
+import qualified System.IO.Streams as Stream
+import qualified System.IO.Streams.Concurrent as Stream
+
 import qualified Text.Digestive as DF
+import qualified Text.HandsomeSoup as HS
+import qualified Text.XML.HXT.Core as HXT
 
 -- | The main type for this library, where `b` is your application state,
 -- often called `App`. This is a State monad on top of IO, where the State carries
 -- your application (or, more specifically, a top-level handler), and stream of test results
 -- to be reported as passing or failing.
-type SnapTesting b a = StateT (Handler b b (), SnapletInit b b, OutputStream TestLog) IO a
+type SnapTesting b a = StateT (Handler b b (), SnapletInit b b, OutputStream TestResult) IO a
 
--- | TestRequests are created with `get` and `post`.
-type TestRequest = RequestBuilder IO ()
+data TestResponse = Html Text | NotFound | Redirect Int Text | Other Int | Empty
 
--- | TestLog is what is streamed to report generators. It is a flatten tree structure.
-data TestLog = NameStart Text | NameEnd | TestPass Text | TestFail Text | TestError Text deriving Show
+data CssSelector = CssSelector Text
 
-data SnapTestingConfig = SnapTestingConfig { reportGenerators :: [InputStream TestLog -> IO ()]
+data Sentiment a = Positive a | Negative a deriving Show
+
+flipSentiment :: Sentiment a -> Sentiment a
+flipSentiment (Positive a) = Negative a
+flipSentiment (Negative a) = Positive a
+
+data TestResult = NameStart Text
+                 | NameEnd
+                 | TestPass (Sentiment Text)
+                 | TestFail (Sentiment Text)
+                 | TestError Text deriving Show
+
+data SnapTestingConfig = SnapTestingConfig { reportGenerators :: [InputStream TestResult -> IO ()]
                                            }
+
 
 defaultConfig :: SnapTestingConfig
 defaultConfig = SnapTestingConfig { reportGenerators = [consoleReport]
@@ -109,9 +132,9 @@ defaultConfig = SnapTestingConfig { reportGenerators = [consoleReport]
 
 -- | dupN duplicates an input stream N times
 dupN :: Int -> InputStream a -> IO [InputStream a]
-dupN 0 s = return []
+dupN 0 _ = return []
 dupN 1 s = return [s]
-dupN n s = do (a, b) <- S.map (\x -> (x,x)) s >>= S.unzip
+dupN n s = do (a, b) <- Stream.map (\x -> (x,x)) s >>= Stream.unzip
               rest <- dupN (n - 1) b
               return (a:rest)
 
@@ -122,12 +145,12 @@ runSnapTests :: SnapTestingConfig              -- ^ Configuration for test runne
              -> SnapTesting b ()               -- ^ Block of tests
              -> IO ()
 runSnapTests conf site app tests = do
-  (inp, out) <- S.makeChanPipe
+  (inp, out) <- Stream.makeChanPipe
   let rgs = reportGenerators conf
   istreams <- dupN (length rgs) inp
-  consumers <- mapM (\(inp, hndl) -> async (hndl inp)) (zip istreams rgs)
+  consumers <- mapM (\(inp', hndl) -> async (hndl inp')) (zip istreams rgs)
   evalStateT tests (site, app, out)
-  S.write Nothing out
+  Stream.write Nothing out
   mapM_ wait consumers
   return ()
 
@@ -137,9 +160,9 @@ runSnapTests conf site app tests = do
 -- > /auth/new_user
 -- >  success PASSED
 -- >  creates a new account PASSED
-consoleReport :: InputStream TestLog -> IO ()
+consoleReport :: InputStream TestResult -> IO ()
 consoleReport stream = cr 0
-  where cr indent = do log <- S.read stream
+  where cr indent = do log <- Stream.read stream
                        case log of
                          Nothing -> putStrLn "" >> return ()
                          Just (NameStart n) -> do putStrLn ""
@@ -161,9 +184,9 @@ consoleReport stream = cr 0
 
 -- | Sends the test results to desktop notifications on linux.
 -- Prints how many tests passed and failed.
-linuxDesktopReport :: InputStream TestLog -> IO ()
+linuxDesktopReport :: InputStream TestResult -> IO ()
 linuxDesktopReport stream = do
-  res <- S.toList stream
+  res <- Stream.toList stream
   let (failing, total) = count [] res
   case failing of
     [] ->
@@ -173,7 +196,7 @@ linuxDesktopReport stream = do
       void $ system $ "notify-send -u normal -t 2000 'Some Tests Failing' '" ++
                       (show (length failing)) ++ " out of " ++
                       (show total) ++ " tests failed:\n\n" ++ (intercalate "\n\n" $ reverse failing) ++ "'"
- where count :: [Text] -> [TestLog] -> ([String], Int)
+ where count :: [Text] -> [TestResult] -> ([String], Int)
        count _ [] = ([], 0)
        count n (TestPass _ : xs) = let (f, t) = count n xs
                                    in (f, 1 + t)
@@ -185,63 +208,104 @@ linuxDesktopReport stream = do
        count n (NameEnd : xs) = count (tail n) xs
        count n (_ : xs) = count n xs
 
-writeRes :: TestLog -> SnapTesting b ()
+writeRes :: TestResult -> SnapTesting b ()
 writeRes log = do (_,_,out) <- S.get
-                  lift $ S.write (Just log) out
+                  lift $ Stream.write (Just log) out
 
 -- | Labels a block of tests with a descriptive name, to be used in report generation.
 name :: Text              -- ^ Name of block
      -> SnapTesting b ()  -- ^ Block of tests
      -> SnapTesting b ()
 name s a = do
-  (_,_,out) <- S.get
   writeRes (NameStart s)
   a
   writeRes NameEnd
 
--- | Creates a new GET request.
-get :: ByteString -- ^ The url to request.
-    -> TestRequest
-get = flip Test.get mempty
+runRequest :: RequestBuilder IO () -> SnapTesting b TestResponse
+runRequest req = do
+  (site, app, _) <- S.get
+  res <- liftIO $ runHandlerSafe req site app
+  case res of
+    Left err -> do
+      writeRes (TestError err)
+      return $ Empty
+    Right response -> do
+      case rspStatus response of
+        404 -> return NotFound
+        200 -> do
+          body <- liftIO $ getResponseBody response
+          return $ Html $ decodeUtf8 body
+        _ -> if (rspStatus response) >= 300 && (rspStatus response) < 400
+                then do let url = fromMaybe "" $ getHeader "Location" response
+                        return (Redirect (rspStatus response) (decodeUtf8 url))
+                else return (Other (rspStatus response))
 
--- | Creates a new GET request, with query parameters.
-get' :: ByteString -- ^ The url to request.
-     -> Map ByteString [ByteString] -- ^ The parameters to send.
-     -> TestRequest
-get' = Test.get
+get :: Text
+     -> SnapTesting b TestResponse
+get = flip get' M.empty
+
+get' :: Text
+     -> Map ByteString [ByteString]
+     -> SnapTesting b TestResponse
+get' path ps = runRequest (Test.get (encodeUtf8 path) ps)
+
 
 -- | Creates a new POST request, with a set of parameters.
-post :: ByteString                  -- ^ The url to request.
+post :: Text                        -- ^ The url to request.
      -> Map ByteString [ByteString] -- ^ The parameters to send.
-     -> TestRequest
-post = Test.postUrlEncoded
+     -> SnapTesting b TestResponse
+post path ps = runRequest (Test.postUrlEncoded (encodeUtf8 path) ps)
 
 -- | A helper to construct parameters.
 params :: [(ByteString, ByteString)] -- ^ Pairs of parameter and value.
        -> Map ByteString [ByteString]
-params = fromList . map (\x -> (fst x, [snd x]))
+params = M.fromList . map (\x -> (fst x, [snd x]))
+
+css :: Applicative m => Text -> m CssSelector
+css = pure . CssSelector
+
+val :: Applicative m => a -> m a
+val = pure
+
+should :: SnapTesting b TestResult -> SnapTesting b ()
+should test = do res <- test
+                 writeRes res
+
+shouldNot :: SnapTesting b TestResult -> SnapTesting b ()
+shouldNot test = do res <- test
+                    case res of
+                      TestPass msg -> writeRes (TestFail (flipSentiment msg))
+                      TestFail msg -> writeRes (TestPass (flipSentiment msg))
+                      _ -> writeRes res
+
+haveSelector :: TestResponse -> CssSelector -> TestResult
+haveSelector (Html body) (CssSelector selector) = case HXT.runLA (HXT.hread HXT.>>> HS.css (unpack selector)) (unpack body)  of
+                                                    [] -> TestFail msg
+                                                    _ -> TestPass msg
+  where msg = (Positive $ T.concat ["Html contains selector: ", selector, "\n\n", body])
+
+haveText :: TestResponse -> Text -> TestResult
+haveText (Html body) match =
+  if T.isInfixOf match body
+  then TestPass (Positive $ T.concat [body, "' contains '", match, "'."])
+
+  else TestFail (Positive $ T.concat [body, "' contains '", match, "'."])
+haveText _ match = TestFail (Positive (T.concat ["Body contains: ", match]))
+
 
 -- | Checks that the handler evaluates to the given value.
-equals :: (Show a, Eq a) => a -- ^ Value to compare against
-       -> Handler b b a       -- ^ Handler that should evaluate to the same thing
-       -> SnapTesting b ()
-equals a ha = do
-  b <- eval ha
-  res <- testEqual "Expected value to equal " a b
-  writeRes res
-
--- | Checks that the handler does not evaluate to the given value.
-notequals :: (Show a, Eq a) => a -- ^ Value to compare against
-          -> Handler b b a       -- ^ Handler that should not evaluate to the same thing
-          -> SnapTesting b ()
-notequals a ha = do
-  b <- eval ha
-  res <- testNotEqual "Did not expect value to equal " a b
-  writeRes res
+equal :: (Show a, Eq a)
+      => a
+      -> a
+      -> TestResult
+equal a b = if a == b
+               then TestPass (Positive (T.concat [pack $ show a, " == ", pack $ show b]))
+               else TestFail (Positive (T.concat [pack $ show a, " == ", pack $ show b]))
 
 -- | Helper to bring the results of other tests into the test suite.
-assert :: Bool -> SnapTesting b ()
-assert b = equals b (return True)
+beTrue :: Bool -> TestResult
+beTrue True = TestPass (Positive "assertion")
+beTrue False = TestFail (Positive "assertion")
 
 -- | A data type for tests against forms.
 data FormExpectations a = Value a           -- ^ The value the form should take (and should be valid)
@@ -257,35 +321,40 @@ form :: (Eq a, Show a)
 form expected theForm theParams =
   do r <- eval $ DF.postForm "form" theForm (const $ return lookupParam)
      case expected of
-       Value a -> equals (snd r) (return $ Just a)
+       Value a -> should $ equal <$> val (snd r) <*> val (Just a)
        ErrorPaths expectedPaths ->
          do let viewErrorPaths = map (DF.fromPath . fst) $ DF.viewErrors $ fst r
-            assert (all (`elem` viewErrorPaths) expectedPaths
-                    && (length viewErrorPaths == length expectedPaths))
+            should $ beTrue <$> val (all (`elem` viewErrorPaths) expectedPaths
+                                     && (length viewErrorPaths == length expectedPaths))
   where lookupParam pth = case M.lookup (DF.fromPath pth) fixedParams of
                             Nothing -> return []
                             Just v -> return [DF.TextInput v]
         fixedParams = M.mapKeys (T.append "form.") theParams
 
 -- | Checks that the given request results in a success (200) code.
-succeeds :: TestRequest -> SnapTesting b ()
-succeeds req = run req testSuccess
+succeed :: TestResponse -> TestResult
+succeed (Html _) = TestPass (Positive "Request 200s.")
+succeed _ = TestFail (Positive "Request 200s.")
 
 -- | Checks that the given request results in a not found (404) code.
-notfound :: TestRequest -> SnapTesting b ()
-notfound req = run req test404
+notfound :: TestResponse -> TestResult
+notfound NotFound = TestPass (Positive "Request 404s.")
+notfound _ = TestFail (Positive "Request 404s.")
 
 -- | Checks that the given request results in a redirect (3**) code.
-redirects :: TestRequest -> SnapTesting b ()
-redirects req = run req testRedirect
+redirect :: TestResponse -> TestResult
+redirect (Redirect _ _) = TestPass (Positive "Request redirects.")
+redirect _ = TestFail (Positive "Request redirects.")
 
 -- | Checks that the given request results in a redirect to a specific url.
-redirectsto :: TestRequest -- ^ Request to run
-            -> Text        -- ^ URL it should redirect to
-            -> SnapTesting b ()
-redirectsto req uri = run req (testRedirectTo $ encodeUtf8 uri)
+redirectTo :: TestResponse -- ^ Request to run
+           -> Text         -- ^ URL it should redirect to
+           -> TestResult
+redirectTo (Redirect _ actual) expected | actual == expected = TestPass (Positive (T.concat ["Redirecting actual: ", actual, " expected: ", expected]))
+redirectTo (Redirect _ actual) expected = TestFail (Positive (T.concat ["Redirecting actual: ", actual, " expected: ", expected]))
+redirectTo _ expected = TestFail (Positive (T.concat ["Redirects to ", expected]))
 
--- | Checks that the monadic value given changes by the function specified after the request is run.
+-- | Checks that the monadic value given changes by the function specified after the given test block is run.
 --
 -- For example, if you wanted to make sure that account creation was creating new accounts:
 --
@@ -294,38 +363,15 @@ redirectsto req uri = run req (testRedirectTo $ encodeUtf8 uri)
 -- >                             , ("new_user.email", "jdoe@c.com")
 -- >                             , ("new_user.password", "foobar")])
 changes :: (Show a, Eq a)
-        => (a -> a)      -- ^ Change function
-        -> Handler b b a -- ^ Monadic value
-        -> TestRequest   -- ^ Request to run.
+        => (a -> a)          -- ^ Change function
+        -> Handler b b a     -- ^ Monadic value
+        -> SnapTesting b c   -- ^ Test block to run.
         -> SnapTesting b ()
-changes delta measure req = do
-  (site, app, _) <- S.get
-  changes' delta measure (liftIO $ runHandlerSafe req site app)
-
--- | A more general variant of `changes` that allows an arbitrary block instead of a request.
-changes' :: (Show a, Eq a) =>
-            (a -> a)        -- ^ Change function
-         -> Handler b b a   -- ^ Monadic value
-         -> SnapTesting b c -- ^ Block of tests to run
-         -> SnapTesting b ()
-changes' delta measure act = do
+changes delta measure act = do
   before <- eval measure
   _ <- act
   after <- eval measure
-  res <- testEqual "Expected value to change" (delta before) after
-  writeRes res
-
--- | Checks that the response body of a given request contains some text.
-contains :: TestRequest -- ^ Request to run
-         -> Text        -- ^ Text that body should contain
-         -> SnapTesting b ()
-contains req mtch = run req (testBodyContains (encodeUtf8 mtch))
-
--- | Checks that the response body of a given request does not contain some text.
-notcontains :: TestRequest -- ^ Request to run
-            -> Text        -- ^ Text that body should not contain
-            -> SnapTesting b ()
-notcontains req mtch = run req (testBodyNotContains (encodeUtf8 mtch))
+  should $ equal <$> val (delta before) <*> val after
 
 -- | Runs an action after a block of tests, usually used to remove database state.
 cleanup :: Handler b b ()   -- ^ Action to run after tests
@@ -334,7 +380,7 @@ cleanup :: Handler b b ()   -- ^ Action to run after tests
 cleanup cu act = do
   act
   (_, app, _) <- S.get
-  _ <- liftIO $ runHandlerSafe (get "") cu app
+  _ <- liftIO $ runHandlerSafe (Test.get "" M.empty) cu app
   return ()
 
 -- | Evaluate arbitrary actions
@@ -362,96 +408,16 @@ quickCheck :: Testable prop => prop -> SnapTesting b ()
 quickCheck p = do
   res <- liftIO $ quickCheckWithResult (stdArgs { chatty = False }) p
   case res of
-    Success{} -> writeRes (TestPass "")
-    GaveUp{} -> writeRes (TestPass "")
-    Failure{} -> writeRes (TestFail "")
-    NoExpectedFailure{} -> writeRes (TestFail "")
+    Success{} -> writeRes (TestPass (Positive ""))
+    GaveUp{} -> writeRes (TestPass (Positive ""))
+    Failure{} -> writeRes (TestFail (Positive ""))
+    NoExpectedFailure{} -> writeRes (TestFail (Positive ""))
 
 -- Private helpers
-runHandlerSafe :: TestRequest -> Handler b b v -> SnapletInit b b -> IO (Either Text Response)
+runHandlerSafe :: RequestBuilder IO () -> Handler b b v -> SnapletInit b b -> IO (Either Text Response)
 runHandlerSafe req site app =
   catch (runHandler (Just "test") req site app) (\(e::SomeException) -> return $ Left (pack $ show e))
 
 evalHandlerSafe :: Handler b b v -> SnapletInit b b -> IO (Either Text v)
 evalHandlerSafe act app =
-  catch (evalHandler (Just "test") (get "") act app) (\(e::SomeException) -> return $ Left (pack $ show e))
-
-
-run :: TestRequest -> (Response -> SnapTesting b TestLog) -> SnapTesting b ()
-run req asrt = do
-  (site, app, _) <- S.get
-  res <- liftIO $ runHandlerSafe req site app
-  case res of
-    Left err -> writeRes (TestError err)
-    Right response -> do
-      testlog <- asrt response
-      writeRes testlog
-
--- Low level matchers - these parallel HUnit assertions in Snap.Test
-
-testEqual :: (Eq a, Show a) => Text -> a -> a -> SnapTesting b TestLog
-testEqual msg a b = return $ if a == b then TestPass "" else TestFail msg
-
-testNotEqual :: (Eq a, Show a) => Text -> a -> a -> SnapTesting b TestLog
-testNotEqual msg a b = return $ if a /= b then TestPass "" else TestFail msg
-
-testBool :: Text -> Bool -> SnapTesting b TestLog
-testBool msg b = return $ if b then TestPass "" else TestFail msg
-
-testSuccess :: Response -> SnapTesting b TestLog
-testSuccess rsp = testEqual message 200 status
-  where
-    message = pack $ "Expected success (200) but got (" ++ show status ++ ")"
-    status  = rspStatus rsp
-
-test404 :: Response -> SnapTesting b TestLog
-test404 rsp = testEqual message 404 status
-  where
-    message = pack $ "Expected Not Found (404) but got (" ++ show status ++ ")"
-    status = rspStatus rsp
-
-testRedirectTo :: ByteString
-                  -> Response
-                  -> SnapTesting b TestLog
-testRedirectTo uri rsp = do
-    testRedirect rsp
-    liftIO $ print (listHeaders rsp)
-    return $ if uri `isPrefixOf` rspUri
-               then TestPass ""
-               else TestFail message
-  where
-    rspUri = fromMaybe "" $ getHeader "Location" rsp
-    message = pack $ "Expected redirect to " ++ show uri
-              ++ " but got redirected to "
-              ++ show rspUri ++ " instead"
-
-testRedirect :: Response -> SnapTesting b TestLog
-testRedirect rsp = testBool message (300 <= status && status <= 399)
-  where
-    message = pack $ "Expected redirect but got status code ("
-              ++ show status ++ ")"
-    status  = rspStatus rsp
-
-
-containsGen :: (Bool -> Bool) -> Text -> ByteString -> Response -> SnapTesting b TestLog
-containsGen b message match rsp =
-  do
-    body <- liftIO $ getResponseBody rsp
-    return $ if b (match `isInfixOf` body) then TestPass "" else TestFail message
-
-testBodyContains :: ByteString
-                -> Response
-                -> SnapTesting b TestLog
-testBodyContains match = containsGen id message match
-  where
-    message = pack $ "Expected body to contain \"" ++ show match
-              ++ "\", but didn't"
-
-
-testBodyNotContains :: ByteString
-                   -> Response
-                   -> SnapTesting b TestLog
-testBodyNotContains match = containsGen not message match
-  where
-    message = pack $ "Expected body to not contain \"" ++ show match
-              ++ "\", but did"
+  catch (evalHandler (Just "test") (Test.get "" M.empty) act app) (\(e::SomeException) -> return $ Left (pack $ show e))

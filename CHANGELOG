@@ -1,3 +1,9 @@
+0.5.0.0 - 2014-4-? - Redesign library around richer types and Applicative.
+  * Basic building block is should/shouldNot, which lift a pure test function
+	into the SnapTesting monad.
+  * get / post create rich response type.
+  * Add html / css matcher predicates.
+
 0.4.1.1 - 2014-3-20 - Add this changelog to hackage, grammar in comments.
 
 0.4.1.0 - 2014-3-20 - Add form tests, assert.
