@@ -172,15 +172,23 @@ consoleReport stream = cr 0
                          Just NameEnd -> cr (indent - indentUnit)
                          Just (TestPass _) -> do putStr " PASSED"
                                                  cr indent
-                         Just (TestFail _) -> do putStr " FAILED"
-                                                 cr indent
+                         Just (TestFail msg) -> do putStr " FAILED\n"
+                                                   printMessage indent msg
+                                                   cr indent
                          Just (TestError msg) -> do putStr " ERROR("
                                                     putStr (unpack msg)
                                                     putStr ")"
                                                     cr indent
         indentUnit = 2
         printIndent n = putStr (replicate n ' ')
-
+        printMessage n (Positive m) = do printIndent n
+                                         putStrLn "Should have held:"
+                                         printIndent n
+                                         putStrLn (unpack m)
+        printMessage n (Negative m) = do printIndent n
+                                         putStrLn "Should not have held:"
+                                         printIndent n
+                                         putStrLn (unpack m)
 
 -- | Sends the test results to desktop notifications on linux.
 -- Prints how many tests passed and failed.
