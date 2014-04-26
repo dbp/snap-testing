@@ -319,7 +319,7 @@ form :: (Eq a, Show a)
      -> Map Text Text                -- ^ The parameters to pass
      -> SnapTesting b ()
 form expected theForm theParams =
-  do r <- eval $ DF.postForm "form" theForm (const $ return lookupParam)
+  do r <- eval $ DF.postForm "form" theForm lookupParam
      case expected of
        Value a -> should $ equal <$> val (snd r) <*> val (Just a)
        ErrorPaths expectedPaths ->
