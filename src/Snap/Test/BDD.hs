@@ -45,6 +45,9 @@ module Snap.Test.BDD
        , haveText
        , haveSelector
 
+       -- * Manipulation of responses
+       , restrictPage
+
        -- * Stateful value tests
        , changes
 
@@ -295,9 +298,10 @@ shouldNot test = do res <- test
                       _ -> writeRes res
 
 haveSelector :: TestResponse -> CssSelector -> TestResult
-haveSelector (Html body) (CssSelector selector) = case HXT.runLA (HXT.hread HXT.>>> HS.css (unpack selector)) (unpack body)  of
-                                                    [] -> TestFail msg
-                                                    _ -> TestPass msg
+haveSelector (Html body) (CssSelector selector) =
+  case HXT.runLA (HXT.hread HXT.>>> HS.css (unpack selector)) (unpack body)  of
+    [] -> TestFail msg
+    _ -> TestPass msg
   where msg = (Positive $ T.concat ["Html contains selector: ", selector, "\n\n", body])
 
 haveText :: TestResponse -> Text -> TestResult
@@ -308,6 +312,10 @@ haveText (Html body) match =
   else TestFail (Positive $ T.concat [body, "' contains '", match, "'."])
 haveText _ match = TestFail (Positive (T.concat ["Body contains: ", match]))
 
+
+restrictPage :: Text -> TestResponse -> TestResponse
+restrictPage selector (Html body) =
+  Html (T.concat $ map pack $ HXT.runLA (HXT.xshow (HXT.hread HXT.>>> HS.css (unpack selector))) (unpack body))
 
 -- | Checks that the handler evaluates to the given value.
 equal :: (Show a, Eq a)
