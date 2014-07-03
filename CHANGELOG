@@ -1,4 +1,10 @@
-0.5.0.0 - 2014-4-? - Redesign library around richer types and Applicative.
+0.6.0.0 - 2014-7-? - Add additional helpers, and use much faster method of running tests.
+  * The biggest change is because of a patch to snap that allows us to only run the
+	initializer once for an entire test suite, which can easily be an order of
+	magnitude (or more) speedup.
+  * Also add a test-suite to the library.
+
+0.5.0.0 - Not released to hackage - Redesign library around richer types and Applicative.
   * Basic building block is should/shouldNot, which lift a pure test function
 	into the SnapTesting monad.
   * get / post create rich response type.
