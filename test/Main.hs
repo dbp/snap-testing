@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, NoMonomorphismRestriction, GADTs #-}
+{-# LANGUAGE OverloadedStrings, NoMonomorphismRestriction, GADTs, TemplateHaskell #-}
 
 module Main where
 
@@ -7,16 +7,18 @@ module Main where
 -- Section 0: Imports.                                  --
 ----------------------------------------------------------
 import Control.Applicative
+import Control.Lens
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import Data.Maybe (fromMaybe)
 import qualified Data.Map as M
 import Snap (Handler, method, Method(..), writeText, writeBS,
              getParam, SnapletInit, makeSnaplet, addRoutes,
-             route)
+             route, liftIO, void)
 import qualified Snap as Snap
 
 import Control.Concurrent.Async (async)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, tryPutMVar, tryTakeMVar, isEmptyMVar)
 import qualified System.IO.Streams as Stream
 import qualified System.IO.Streams.Concurrent as Stream
 import System.Exit (exitSuccess, exitFailure)
@@ -26,6 +28,10 @@ import Snap.Test.BDD
 ----------------------------------------------------------
 -- Section 1: Example application used for testing.     --
 ----------------------------------------------------------
+data App = App { _mv :: MVar () }
+
+makeLenses ''App
+
 html :: Text
 html = "<table><tr><td>One</td><td>Two</td></tr></table>"
 
@@ -35,14 +41,16 @@ routes = [("/test", method GET $ writeText html)
          ,("/params", do mq <- getParam "q"
                          writeBS $ fromMaybe "" mq)
          ,("/redirect", Snap.redirect "/test")
+         ,("/setmv", do m <- use mv
+                        liftIO $ tryPutMVar m ()
+                        return ())
          ]
 
-app :: SnapletInit App App
-app = makeSnaplet "app" "An snaplet example application." Nothing $ do
-    addRoutes routes
-    return App
+app :: MVar () -> SnapletInit App App
+app mv = makeSnaplet "app" "An snaplet example application." Nothing $ do
+       addRoutes routes
+       return (App mv)
 
-data App = App
 
 ----------------------------------------------------------
 -- Section 2: Test suite against application.           --
@@ -77,6 +85,13 @@ tests = do
       should $ redirectTo <$> get "/redirect" <*> val "/test"
       shouldNot $ redirectTo <$> get "/redirect" <*> val "/redirect"
       shouldNot $ redirectTo <$> get "/test" <*> val "/redirect"
+  name "should reflect stateful changes" $ do
+    let isE = use mv >>= \m -> liftIO $ isEmptyMVar m
+    cleanup (use mv >>= \m -> void $ liftIO $ tryTakeMVar m) $ do
+      should $ equal <$> eval isE <*> val True
+      changes not isE $ post "/setmv" M.empty
+      changes id isE $ post "/setmv" M.empty
+    should $ equal <$> eval isE <*> val True
 
 ----------------------------------------------------------
 -- Section 3: Code to interface with cabal test.        --
@@ -84,13 +99,13 @@ tests = do
 main :: IO ()
 main = do
   (inp, out) <- Stream.makeChanPipe
+  mvar <- newEmptyMVar
   async $ runSnapTests defaultConfig { reportGenerators = [streamReport out, consoleReport] }
                        (route routes)
-                       app
+                       (app mvar)
                        tests
   res <- Stream.toList inp
-  let failing = length $ filter isFailing res
-  if failing == 0
+  if length (filter isFailing res) == 0
      then exitSuccess
      else exitFailure
  where streamReport out results = do res <- Stream.read results
