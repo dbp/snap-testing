@@ -15,7 +15,6 @@ library
   exposed-modules:
         Snap.Test.BDD
   hs-source-dirs: src
-  -- other-modules:
   build-depends:       base >= 4.6 && < 4.8,
                        QuickCheck == 2.*,
                        snap >= 0.13.2.8 && < 0.14,
@@ -31,3 +30,25 @@ library
                        digestive-functors == 0.7.*,
                        hxt == 9.*,
                        HandsomeSoup == 0.3.*
+
+
+Test-Suite test-snap-testing
+    type:       exitcode-stdio-1.0
+    hs-source-dirs: test
+    main-is: Main.hs
+    build-depends:     base >= 4.6 && < 4.8,
+                       QuickCheck == 2.*,
+                       snap >= 0.13.2.8 && < 0.14,
+                       snap-core >= 0.9 && < 0.10,
+                       mtl >= 2 && < 3,
+                       transformers == 0.3.*,
+                       text >= 0.11 && < 1.2,
+                       bytestring >= 0.9.1 && < 0.11,
+                       containers == 0.5.*,
+                       process >= 1.1 && < 1.3,
+                       io-streams == 1.*,
+                       async == 2.*,
+                       digestive-functors == 0.7.*,
+                       hxt == 9.*,
+                       HandsomeSoup == 0.3.*
+    build-depends: snap-testing >= 0.6
