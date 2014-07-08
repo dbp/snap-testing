@@ -5,6 +5,7 @@ module Snap.Test.BDD
        -- * Types
          SnapTesting
        , TestResult(..)
+       , Sentiment(..)
        , TestResponse(..)
        , SnapTestingConfig (..)
 
@@ -108,26 +109,38 @@ type SnapTesting b a = StateT (Handler b b ()
                               , (Snaplet b, InitializerState b)
                               , OutputStream TestResult) IO a
 
+-- | A TestResponse is the result of making a request. Many predicates operate on these types of
+-- responses, and custom predicates can be written against them.
 data TestResponse = Html Text | NotFound | Redirect Int Text | Other Int | Empty
 
 data CssSelector = CssSelector Text
 
+-- | Tests have messages that are agnostic to whether the result should hold or should not hold.
+-- The sentiment is attached to them to indicate that positive/negative statement. This allows
+-- the same message to be used for tests asserted with `should` and `shouldNot`.
 data Sentiment a = Positive a | Negative a deriving Show
 
 flipSentiment :: Sentiment a -> Sentiment a
 flipSentiment (Positive a) = Negative a
 flipSentiment (Negative a) = Positive a
 
+
+-- | TestResult is a a flattened tree structure that reflects the structure of your tests,
+-- and is the data that is passed to report generators.
 data TestResult = NameStart Text
                  | NameEnd
                  | TestPass (Sentiment Text)
                  | TestFail (Sentiment Text)
                  | TestError Text deriving Show
 
+-- | The configuration that is passed to the test runner, currently just a list of report
+-- generators, that are each passed a stream of results, and can do any side effecting thing
+-- with them.
 data SnapTestingConfig = SnapTestingConfig { reportGenerators :: [InputStream TestResult -> IO ()]
                                            }
 
 
+-- | The default configuration just prints results to the console, using the `consoleReport`.
 defaultConfig :: SnapTestingConfig
 defaultConfig = SnapTestingConfig { reportGenerators = [consoleReport]
                                   }
@@ -222,7 +235,6 @@ linuxDesktopReport stream = do
                                     in (f, 1 + t)
        count n (NameStart nm : xs) = count (nm:n) xs
        count n (NameEnd : xs) = count (tail n) xs
-       count n (_ : xs) = count n xs
 
 writeRes :: TestResult -> SnapTesting b ()
 writeRes log = do (_,_,out) <- S.get
@@ -256,12 +268,15 @@ runRequest req = do
                         return (Redirect (rspStatus response) (decodeUtf8 url))
                 else return (Other (rspStatus response))
 
-get :: Text
+-- | Runs a GET request
+get :: Text                         -- ^ The url to request.
      -> SnapTesting b TestResponse
 get = flip get' M.empty
 
-get' :: Text
-     -> Map ByteString [ByteString]
+
+-- | Runs a GET request, with a set of parameters.
+get' :: Text                        -- ^ The url to request.
+     -> Map ByteString [ByteString] -- ^ The parameters to send.
      -> SnapTesting b TestResponse
 get' path ps = runRequest (Test.get (encodeUtf8 path) ps)
 
@@ -277,16 +292,22 @@ params :: [(ByteString, ByteString)] -- ^ Pairs of parameter and value.
        -> Map ByteString [ByteString]
 params = M.fromList . map (\x -> (fst x, [snd x]))
 
+-- | Constructor for CSS selectors
 css :: Applicative m => Text -> m CssSelector
 css = pure . CssSelector
 
+-- | A constructor for pure values (this is just a synonym for `pure` from `Applicative`).
 val :: Applicative m => a -> m a
 val = pure
 
+-- | This takes a TestResult and writes it to the test log, so it is processed
+-- by the report generators.
 should :: SnapTesting b TestResult -> SnapTesting b ()
 should test = do res <- test
                  writeRes res
 
+-- | This is similar to `should`, but it asserts that the test should fail, and
+-- inverts the corresponding message sentiment.
 shouldNot :: SnapTesting b TestResult -> SnapTesting b ()
 shouldNot test = do res <- test
                     case res of
@@ -294,12 +315,15 @@ shouldNot test = do res <- test
                       TestFail msg -> writeRes (TestPass (flipSentiment msg))
                       _ -> writeRes res
 
+-- | Assert that a response (which should be Html) has a given selector.
 haveSelector :: TestResponse -> CssSelector -> TestResult
 haveSelector (Html body) (CssSelector selector) = case HXT.runLA (HXT.hread HXT.>>> HS.css (unpack selector)) (unpack body)  of
                                                     [] -> TestFail msg
                                                     _ -> TestPass msg
   where msg = (Positive $ T.concat ["Html contains selector: ", selector, "\n\n", body])
+haveSelector _ (CssSelector match) = TestFail (Positive (T.concat ["Body contains css selector: ", match]))
 
+-- | Asserts that a response (which should be Html) has given text.
 haveText :: TestResponse -> Text -> TestResult
 haveText (Html body) match =
   if T.isInfixOf match body

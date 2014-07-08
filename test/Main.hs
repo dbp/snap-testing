@@ -60,6 +60,8 @@ tests = do
   name "should match selector from a GET request" $ do
     should $ haveSelector <$> get "/test" <*> css "table td"
     shouldNot $ haveSelector <$> get "/test" <*> css "table td.doesntexist"
+    shouldNot $ haveSelector <$> get "/redirect" <*> css "table td.doesntexist"
+    shouldNot $ haveSelector <$> get "/invalid_url" <*> css "table td.doesntexist"
   name "should not match html on POST request" $
     shouldNot $ haveText <$> post "/test" M.empty <*> val "<html>"
   name "should post parameters" $ do
