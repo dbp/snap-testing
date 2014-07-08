@@ -1,4 +1,4 @@
-0.6.0.0 - 2014-7-? - Add additional helpers, and use much faster method of running tests.
+0.6.0.0 - 2014-7-8 - Add additional helpers, and use much faster method of running tests.
   * The biggest change is because of a patch to snap that allows us to only run the
 	initializer once for an entire test suite, which can easily be an order of
 	magnitude (or more) speedup.
