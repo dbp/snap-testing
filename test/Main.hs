@@ -57,6 +57,42 @@ app mv = makeSnaplet "app" "An snaplet example application." Nothing $ do
 ----------------------------------------------------------
 tests :: SnapTesting App ()
 tests = do
+  -- "reuse" the GET
+  name "should match selector monadic style" $ do
+    testResponse <- get "/test"
+    should'    $ haveSelector testResponse $ css' "table td"
+    shouldNot' $ haveSelector testResponse $ css' "table td.doesntexist"
+
+  -- if we swap the arguments of haveSelector to take selector first,
+  -- response second, it gets even better
+  name "should match selector with swapped arguments" $ do
+    -- one liners bound in either direction
+    get "/test" >>= should' . haveSelector' (css' "table td")
+    should' . haveSelector' (css' "table td") =<< get "/test"
+
+    -- alternately use a do block to give a kinda nice appearance
+    -- "hit this route, then check x, y, and z"
+    get "/test" >>= \resp -> do
+      should'    . haveSelector' (css' "table td") $ resp
+      shouldNot' . haveSelector' (css' "table td.doesnotexist") $ resp
+
+    -- going a bit nuts, we could even get rid of the explicit lambda
+    -- and argument repetition by defining a helper like testResp
+    -- and giving it a list of shoulds
+    let testResp tests' resp = sequence_ $ map ($ resp) tests'
+    get "/test" >>= testResp
+      [ should'    . haveSelector' (css' "table td")
+      , shouldNot' . haveSelector' (css' "table td.doesnotexist")
+      ]
+
+    -- going a bit more nuts with another helper
+    -- give a route and a list of tests
+    -- could be easily generalized for different request types
+    let getAndTest path tests' = get path >>= testResp tests'
+    getAndTest "/test" [ should'    . haveSelector' (css' "table td")
+                       , shouldNot' . haveSelector' (css' "table td.doesnotexist")
+                       ]
+
   name "should match selector from a GET request" $ do
     should $ haveSelector <$> get "/test" <*> css "table td"
     shouldNot $ haveSelector <$> get "/test" <*> css "table td.doesntexist"

@@ -25,8 +25,13 @@ module Snap.Test.BDD
        , should
        , shouldNot
 
+       -- * Monadic alternatives
+       , should'
+       , shouldNot'
+
        -- * Helpers for running tests
        , css
+       , css'
        , val
 
        -- * Getting Responses
@@ -49,6 +54,7 @@ module Snap.Test.BDD
        , redirectTo
        , haveText
        , haveSelector
+       , haveSelector'
 
        -- * Stateful value tests
        , changes
@@ -310,9 +316,17 @@ restrictPage _ r = r
 css :: Applicative m => Text -> m CssSelector
 css = pure . CssSelector
 
+css' :: Text -> CssSelector
+css' = CssSelector
+
 -- | A constructor for pure values (this is just a synonym for `pure` from `Applicative`).
 val :: Applicative m => a -> m a
 val = pure
+
+-- | This takes a TestResult and writes it to the test log, so it is processed
+-- by the report generators.
+should' :: TestResult -> SnapTesting b ()
+should' testRes = writeRes testRes
 
 -- | This takes a TestResult and writes it to the test log, so it is processed
 -- by the report generators.
@@ -329,6 +343,14 @@ shouldNot test = do res <- test
                       TestFail msg -> writeRes (TestPass (flipSentiment msg))
                       _ -> writeRes res
 
+-- | This is similar to `should'`, but it asserts that the test should fail, and
+-- inverts the corresponding message sentiment.
+shouldNot' :: TestResult -> SnapTesting b ()
+shouldNot' testRes = case testRes of
+                      TestPass msg -> writeRes (TestFail (flipSentiment msg))
+                      TestFail msg -> writeRes (TestPass (flipSentiment msg))
+                      _ -> writeRes testRes
+
 -- | Assert that a response (which should be Html) has a given selector.
 haveSelector :: TestResponse -> CssSelector -> TestResult
 haveSelector (Html body) (CssSelector selector) = case HXT.runLA (HXT.hread HXT.>>> HS.css (unpack selector)) (unpack body)  of
@@ -336,6 +358,9 @@ haveSelector (Html body) (CssSelector selector) = case HXT.runLA (HXT.hread HXT.
                                                     _ -> TestPass msg
   where msg = (Positive $ T.concat ["Html contains selector: ", selector, "\n\n", body])
 haveSelector _ (CssSelector match) = TestFail (Positive (T.concat ["Body contains css selector: ", match]))
+
+haveSelector' :: CssSelector -> TestResponse -> TestResult
+haveSelector' = flip haveSelector
 
 -- | Asserts that a response (which should be Html) has given text.
 haveText :: TestResponse -> Text -> TestResult
