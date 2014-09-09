@@ -1,4 +1,5 @@
-{-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Snap.Test.BDD
        (
@@ -34,6 +35,9 @@ module Snap.Test.BDD
        , post
        , params
 
+       -- * Work with Responses
+       , restrictPage
+
        -- * Predicates on values
        , equal
        , beTrue
@@ -66,40 +70,43 @@ module Snap.Test.BDD
        , quickCheck
        ) where
 
-import           Prelude hiding (FilePath, log)
-import           Data.Map (Map)
-import qualified Data.Map as M (lookup, mapKeys, empty, fromList)
-import           Data.ByteString (ByteString)
-import           Data.Text (Text, pack, unpack)
-import qualified Data.Text as T (append, concat, isInfixOf)
-import           Data.Text.Encoding (encodeUtf8, decodeUtf8)
-import           Data.Maybe (fromMaybe)
-import           Data.List (intercalate, intersperse)
+import           Data.ByteString              (ByteString)
+import           Data.List                    (intercalate, intersperse)
+import           Data.Map                     (Map)
+import qualified Data.Map                     as M (empty, fromList, lookup,
+                                                    mapKeys)
+import           Data.Maybe                   (fromMaybe)
+import           Data.Text                    (Text, pack, unpack)
+import qualified Data.Text                    as T (append, concat, isInfixOf)
+import           Data.Text.Encoding           (decodeUtf8, encodeUtf8)
+import           Prelude                      hiding (FilePath, log)
 
 import           Control.Applicative
-import           Control.Monad (void)
-import           Control.Monad.Trans
-import           Control.Monad.Trans.State (StateT, evalStateT)
-import qualified Control.Monad.Trans.State as S (get, put)
-import           Control.Exception (SomeException, catch)
 import           Control.Concurrent.Async
-import           System.Process (system)
+import           Control.Exception            (SomeException, catch)
+import           Control.Monad                (void)
+import           Control.Monad.Trans
+import           Control.Monad.Trans.State    (StateT, evalStateT)
+import qualified Control.Monad.Trans.State    as S (get, put)
+import           System.Process               (system)
 
-import           Snap.Core (Response(..), getHeader)
-import           Snap.Snaplet (Handler, SnapletInit, Snaplet)
-import           Snap.Test (RequestBuilder, getResponseBody)
-import qualified Snap.Test as Test
-import           Snap.Snaplet.Test (runHandler', evalHandler', getSnaplet
-                                   , closeSnaplet, InitializerState)
-import           Test.QuickCheck (Args(..), Result(..), Testable, quickCheckWithResult, stdArgs)
+import           Snap.Core                    (Response (..), getHeader)
+import           Snap.Snaplet                 (Handler, Snaplet, SnapletInit)
+import           Snap.Snaplet.Test            (InitializerState, closeSnaplet,
+                                               evalHandler', getSnaplet,
+                                               runHandler')
+import           Snap.Test                    (RequestBuilder, getResponseBody)
+import qualified Snap.Test                    as Test
+import           Test.QuickCheck              (Args (..), Result (..), Testable,
+                                               quickCheckWithResult, stdArgs)
 
-import           System.IO.Streams (InputStream, OutputStream)
-import qualified System.IO.Streams as Stream
+import           System.IO.Streams            (InputStream, OutputStream)
+import qualified System.IO.Streams            as Stream
 import qualified System.IO.Streams.Concurrent as Stream
 
-import qualified Text.Digestive as DF
-import qualified Text.HandsomeSoup as HS
-import qualified Text.XML.HXT.Core as HXT
+import qualified Text.Digestive               as DF
+import qualified Text.HandsomeSoup            as HS
+import qualified Text.XML.HXT.Core            as HXT
 
 -- | The main type for this library, where `b` is your application state,
 -- often called `App`. This is a State monad on top of IO, where the State carries
@@ -291,6 +298,13 @@ post path ps = runRequest (Test.postUrlEncoded (encodeUtf8 path) ps)
 params :: [(ByteString, ByteString)] -- ^ Pairs of parameter and value.
        -> Map ByteString [ByteString]
 params = M.fromList . map (\x -> (fst x, [snd x]))
+
+
+restrictPage :: CssSelector -> TestResponse -> TestResponse
+restrictPage (CssSelector selector) (Html body) = case HXT.runLA (HXT.xshow $ HXT.hread HXT.>>> HS.css (unpack selector)) (unpack body) of
+                                                                  [] -> Html ""
+                                                                  matches -> Html (T.concat (map pack matches))
+restrictPage _ r = r
 
 -- | Constructor for CSS selectors
 css :: Applicative m => Text -> m CssSelector

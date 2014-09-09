@@ -1,7 +1,7 @@
 EXECUTABLE=$(BINDIR)/snap-testing
 DEPS=
 # snapframework/snap-core snapframework/snap snapframework/snap-server snapframework/heist snapframework/snap-loader-static
-TESTMAIN=src/Test/Main.hs
+TESTMAIN=test/Main.hs
 INSTALLFLAGS=-j
 
 EXEC=cabal exec --
