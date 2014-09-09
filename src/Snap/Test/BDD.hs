@@ -300,10 +300,10 @@ params :: [(ByteString, ByteString)] -- ^ Pairs of parameter and value.
 params = M.fromList . map (\x -> (fst x, [snd x]))
 
 
-restrictPage :: CssSelector -> TestResponse -> TestResponse
-restrictPage (CssSelector selector) (Html body) = case HXT.runLA (HXT.xshow $ HXT.hread HXT.>>> HS.css (unpack selector)) (unpack body) of
-                                                                  [] -> Html ""
-                                                                  matches -> Html (T.concat (map pack matches))
+restrictPage :: Text -> TestResponse -> TestResponse
+restrictPage selector (Html body) = case HXT.runLA (HXT.xshow $ HXT.hread HXT.>>> HS.css (unpack selector)) (unpack body) of
+                                                                          [] -> Html ""
+                                                                          matches -> Html (T.concat (map pack matches))
 restrictPage _ r = r
 
 -- | Constructor for CSS selectors
